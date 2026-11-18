@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from typing import Any
 
 from massive import RESTClient
 from massive.rest.models import SnapshotMarketType
@@ -12,6 +14,69 @@ from .cache import PriceCache
 from .interface import MarketDataSource
 
 logger = logging.getLogger(__name__)
+
+
+def to_unix_seconds(ts: float | int | None) -> float | None:
+    """Convert a Massive timestamp to Unix seconds.
+
+    Massive mixes units: trade timestamps (``sip_timestamp``, ``updated``) are
+    nanoseconds, minute-bar timestamps are milliseconds. Detect by magnitude.
+    """
+    if not ts:
+        return None
+    ts = float(ts)
+    if ts > 1e17:  # nanoseconds
+        return ts / 1e9
+    if ts > 1e14:  # microseconds
+        return ts / 1e6
+    if ts > 1e11:  # milliseconds
+        return ts / 1e3
+    return ts
+
+
+def _positive_float(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if v > 0 else None
+
+
+def parse_snapshot(snap: Any) -> tuple[str, float, float] | None:
+    """Extract ``(ticker, price, timestamp_seconds)`` from a massive TickerSnapshot.
+
+    Uses the real SDK field names (``last_trade.price`` / ``last_trade.sip_timestamp``).
+    Falls back to the minute bar, the day bar, then the previous day's close when
+    no last trade is available. Returns None if the snapshot has no usable price.
+    """
+    ticker = getattr(snap, "ticker", None)
+    if not ticker or not isinstance(ticker, str):
+        return None
+
+    last_trade = getattr(snap, "last_trade", None)
+    minute = getattr(snap, "min", None)
+    day = getattr(snap, "day", None)
+    prev_day = getattr(snap, "prev_day", None)
+
+    candidates = [
+        (getattr(last_trade, "price", None), getattr(last_trade, "sip_timestamp", None)),
+        (getattr(minute, "close", None), getattr(minute, "timestamp", None)),
+        (getattr(day, "close", None), None),
+        (getattr(prev_day, "close", None), None),
+    ]
+    for raw_price, raw_ts in candidates:
+        price = _positive_float(raw_price)
+        if price is None:
+            continue
+        timestamp = (
+            to_unix_seconds(raw_ts)
+            or to_unix_seconds(getattr(snap, "updated", None))
+            or time.time()
+        )
+        return ticker.upper(), price, timestamp
+    return None
 
 
 class MassiveDataSource(MarketDataSource):
@@ -97,22 +162,16 @@ class MassiveDataSource(MarketDataSource):
             snapshots = await asyncio.to_thread(self._fetch_snapshots)
             processed = 0
             for snap in snapshots:
-                try:
-                    price = snap.last_trade.price
-                    # Massive timestamps are Unix milliseconds → convert to seconds
-                    timestamp = snap.last_trade.timestamp / 1000.0
-                    self._cache.update(
-                        ticker=snap.ticker,
-                        price=price,
-                        timestamp=timestamp,
-                    )
-                    processed += 1
-                except (AttributeError, TypeError) as e:
+                parsed = parse_snapshot(snap)
+                if parsed is None:
                     logger.warning(
-                        "Skipping snapshot for %s: %s",
+                        "Skipping snapshot for %s: no usable price",
                         getattr(snap, "ticker", "???"),
-                        e,
                     )
+                    continue
+                ticker, price, timestamp = parsed
+                self._cache.update(ticker=ticker, price=price, timestamp=timestamp)
+                processed += 1
             logger.debug("Massive poll: updated %d/%d tickers", processed, len(self._tickers))
 
         except Exception as e:
