@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
+
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def normalize_ticker(raw: str) -> str:
+    """Upper-case and strip a ticker symbol; raise ValueError if it is invalid.
+
+    Used by both data sources and by the API layer, so 'tsla ', 'TSLA' and 'Tsla'
+    are the same ticker everywhere. Accepts class shares such as 'BRK.B' and 'BF-B'.
+    """
+    ticker = raw.strip().upper()
+    if not _TICKER_RE.match(ticker):
+        raise ValueError(f"Invalid ticker symbol: {raw!r}")
+    return ticker
 
 
 class MarketDataSource(ABC):
@@ -55,3 +70,8 @@ class MarketDataSource(ABC):
     @abstractmethod
     def get_tickers(self) -> list[str]:
         """Return the current list of actively tracked tickers."""
+
+    @property
+    def name(self) -> str:
+        """Human-readable source name for /api/health and logs."""
+        return type(self).__name__

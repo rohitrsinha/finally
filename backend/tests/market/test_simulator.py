@@ -129,3 +129,52 @@ class TestGBMSimulator:
         if '.' in price_str:
             decimal_part = price_str.split('.')[1]
             assert len(decimal_part) <= 2
+
+
+class TestDeterminismAndStatistics:
+    """Seeded RNG, correlation structure and volatility calibration."""
+
+    def test_seeded_runs_are_deterministic(self):
+        a = GBMSimulator(["AAPL", "MSFT", "ZZZZ"], seed=42)
+        b = GBMSimulator(["AAPL", "MSFT", "ZZZZ"], seed=42)
+        assert [a.step() for _ in range(200)] == [b.step() for _ in range(200)]
+
+    def test_different_seeds_differ(self):
+        a = GBMSimulator(["AAPL"], seed=1)
+        b = GBMSimulator(["AAPL"], seed=2)
+        assert [a.step() for _ in range(50)] != [b.step() for _ in range(50)]
+
+    def test_cholesky_ok_for_large_mixed_universe(self):
+        tickers = list(SEED_PRICES) + [f"T{i}" for i in range(40)]
+        sim = GBMSimulator(tickers, seed=1)  # raises LinAlgError if not positive-definite
+        assert len(sim.step()) == 50
+
+    def test_log_return_volatility_matches_sigma(self):
+        import numpy as np
+
+        sim = GBMSimulator(["V"], event_probability=0.0, seed=7)
+        prices = [sim.get_price("V")]
+        for _ in range(20_000):
+            sim.step()
+            prices.append(sim.get_price("V"))
+        realized_sigma = np.diff(np.log(prices)).std() / np.sqrt(GBMSimulator.DEFAULT_DT)
+        assert abs(realized_sigma - 0.17) < 0.01
+
+    def test_tech_names_are_positively_correlated(self):
+        import numpy as np
+
+        sim = GBMSimulator(["AAPL", "MSFT"], event_probability=0.0, seed=3)
+        a, m = [], []
+        for _ in range(5_000):
+            pa, pm = sim.get_price("AAPL"), sim.get_price("MSFT")
+            sim.step()
+            a.append(np.log(sim.get_price("AAPL") / pa))
+            m.append(np.log(sim.get_price("MSFT") / pm))
+        assert 0.5 < np.corrcoef(a, m)[0, 1] < 0.7
+
+    def test_shock_events_fire_with_probability_one(self):
+        sim = GBMSimulator(["AAPL"], event_probability=1.0, seed=5)
+        before = sim.get_price("AAPL")
+        sim.step()
+        move = abs(sim.get_price("AAPL") / before - 1)
+        assert 0.019 < move < 0.051

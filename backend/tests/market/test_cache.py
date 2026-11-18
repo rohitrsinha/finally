@@ -101,3 +101,57 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+
+class TestReferencePrice:
+    """reference_price handling, timestamps and versioning."""
+
+    def test_reference_price_defaults_to_first_seen(self):
+        cache = PriceCache()
+        cache.update("AAPL", 190.0)
+        update = cache.update("AAPL", 191.9)
+        assert update.reference_price == 190.0
+        assert update.day_change_percent == 1.0
+
+    def test_explicit_reference_price_is_sticky(self):
+        cache = PriceCache()
+        cache.update("AAPL", 191.0, reference_price=189.2)
+        assert cache.update("AAPL", 192.0).reference_price == 189.2
+
+    def test_explicit_reference_price_can_change(self):
+        cache = PriceCache()
+        cache.update("AAPL", 191.0, reference_price=189.2)
+        assert cache.update("AAPL", 192.0, reference_price=191.5).reference_price == 191.5
+
+    def test_zero_timestamp_is_respected(self):
+        assert PriceCache().update("X", 1.0, timestamp=0.0).timestamp == 0.0
+
+    def test_remove_bumps_version(self):
+        cache = PriceCache()
+        cache.update("AAPL", 1.0)
+        version = cache.version
+        cache.remove("AAPL")
+        assert cache.version == version + 1
+
+    def test_remove_unknown_does_not_bump_version(self):
+        cache = PriceCache()
+        version = cache.version
+        cache.remove("NOPE")
+        assert cache.version == version
+
+    def test_concurrent_writers(self):
+        from threading import Thread
+
+        cache = PriceCache()
+
+        def writer(ticker: str) -> None:
+            for i in range(1000):
+                cache.update(ticker, 100.0 + i)
+
+        threads = [Thread(target=writer, args=(f"T{n}",)) for n in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert cache.version == 8000
+        assert len(cache) == 8

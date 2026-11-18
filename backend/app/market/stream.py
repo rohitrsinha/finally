@@ -14,29 +14,34 @@ from .cache import PriceCache
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/stream", tags=["streaming"])
 
-
-def create_stream_router(price_cache: PriceCache) -> APIRouter:
+def create_stream_router(
+    price_cache: PriceCache,
+    interval: float = 0.5,
+    heartbeat: float = 15.0,
+) -> APIRouter:
     """Create the SSE streaming router with a reference to the price cache.
 
-    This factory pattern lets us inject the PriceCache without globals.
+    Builds a new router on every call (no module-level state), so calling it
+    more than once (e.g. in tests) never registers duplicate routes.
     """
+    router = APIRouter(prefix="/api/stream", tags=["streaming"])
 
     @router.get("/prices")
     async def stream_prices(request: Request) -> StreamingResponse:
         """SSE endpoint for live price updates.
 
-        Streams all tracked ticker prices every ~500ms. The client connects
-        with EventSource and receives events in the format:
+        Each frame is a named `prices` event whose data is a full snapshot of
+        all tracked tickers:
 
+            id: 1042
+            event: prices
             data: {"AAPL": {"ticker": "AAPL", "price": 190.50, ...}, ...}
 
-        Includes a retry directive so the browser auto-reconnects on
-        disconnection (EventSource built-in behavior).
+        Clients listen with `source.addEventListener("prices", ...)`.
         """
         return StreamingResponse(
-            _generate_events(price_cache, request),
+            generate_price_events(price_cache, request, interval, heartbeat),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -48,40 +53,41 @@ def create_stream_router(price_cache: PriceCache) -> APIRouter:
     return router
 
 
-async def _generate_events(
+async def generate_price_events(
     price_cache: PriceCache,
     request: Request,
     interval: float = 0.5,
+    heartbeat: float = 15.0,
 ) -> AsyncGenerator[str, None]:
-    """Async generator that yields SSE-formatted price events.
+    """Yield SSE frames until the client disconnects.
 
-    Sends all prices every `interval` seconds. Stops when the client
-    disconnects (detected via request.is_disconnected()).
+    Sends a full price snapshot whenever the cache version changes (checked
+    every `interval` seconds), and a `: ping` comment after `heartbeat`
+    seconds without data so idle connections aren't closed by proxies.
     """
-    # Tell the client to retry after 1 second if the connection drops
-    yield "retry: 1000\n\n"
-
-    last_version = -1
     client_ip = request.client.host if request.client else "unknown"
     logger.info("SSE client connected: %s", client_ip)
 
+    # Tell the client to retry after 1 second if the connection drops
+    yield "retry: 1000\n\n"
+
+    loop = asyncio.get_running_loop()
+    last_version = -1
+    last_sent = loop.time()
     try:
-        while True:
-            # Check for client disconnect
-            if await request.is_disconnected():
-                logger.info("SSE client disconnected: %s", client_ip)
-                break
-
-            current_version = price_cache.version
-            if current_version != last_version:
-                last_version = current_version
+        while not await request.is_disconnected():
+            version = price_cache.version
+            if version != last_version:
+                last_version = version
                 prices = price_cache.get_all()
-
-                if prices:
-                    data = {ticker: update.to_dict() for ticker, update in prices.items()}
-                    payload = json.dumps(data)
-                    yield f"data: {payload}\n\n"
-
+                payload = json.dumps({t: u.to_dict() for t, u in prices.items()})
+                yield f"id: {version}\nevent: prices\ndata: {payload}\n\n"
+                last_sent = loop.time()
+            elif loop.time() - last_sent >= heartbeat:
+                yield ": ping\n\n"  # SSE comment: ignored by EventSource
+                last_sent = loop.time()
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
-        logger.info("SSE stream cancelled for: %s", client_ip)
+        pass
+    finally:
+        logger.info("SSE client disconnected: %s", client_ip)

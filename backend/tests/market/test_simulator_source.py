@@ -136,3 +136,51 @@ class TestSimulatorDataSource:
         # Just verify it starts and stops cleanly
         await asyncio.sleep(0.2)
         await source.stop()
+
+
+@pytest.mark.asyncio
+class TestSimulatorNormalization:
+    """Ticker normalization and seeding through the async wrapper."""
+
+    async def test_start_normalizes_and_dedupes(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10, seed=1)
+        await source.start(["aapl", "AAPL", " msft "])
+        assert source.get_tickers() == ["AAPL", "MSFT"]
+        await source.stop()
+
+    async def test_add_ticker_normalizes_and_prices_immediately(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.05, seed=1)
+        await source.start(["AAPL"])
+        await source.add_ticker(" tsla ")
+        await source.add_ticker("TSLA")  # duplicate: no-op
+        assert source.get_tickers() == ["AAPL", "TSLA"]
+        assert cache.get_price("TSLA") == 250.0
+        await source.stop()
+
+    async def test_remove_ticker_normalizes(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10, seed=1)
+        await source.start(["AAPL", "MSFT"])
+        await source.remove_ticker("msft")
+        assert source.get_tickers() == ["AAPL"]
+        assert "MSFT" not in cache
+        await source.stop()
+
+    async def test_invalid_ticker_rejected(self):
+        source = SimulatorDataSource(price_cache=PriceCache(), update_interval=10)
+        await source.start([])
+        with pytest.raises(ValueError):
+            await source.add_ticker("not a ticker")
+        await source.stop()
+
+    async def test_daily_change_is_since_session_start(self):
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.01, seed=1)
+        await source.start(["AAPL"])
+        await asyncio.sleep(0.1)
+        update = cache.get("AAPL")
+        assert update.reference_price == 190.0
+        assert update.day_change_percent is not None
+        await source.stop()
