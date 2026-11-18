@@ -1,5 +1,6 @@
 """Tests for MassiveDataSource (mocked)."""
 
+import asyncio
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -220,16 +221,17 @@ class TestParseSnapshot:
     }
 
     def test_uses_last_trade_price_and_sip_timestamp(self):
-        ticker, price, ts = parse_snapshot(TickerSnapshot.from_dict(self.RAW))
-        assert ticker == "AAPL"
-        assert price == 191.52
-        assert abs(ts - 1763460000.123456789) < 1e-6
+        q = parse_snapshot(TickerSnapshot.from_dict(self.RAW))
+        assert q.ticker == "AAPL"
+        assert q.price == 191.52
+        assert abs(q.timestamp - 1763460000.123456789) < 1e-6
+        assert q.reference_price == 189.2  # previous close
 
     def test_falls_back_to_minute_bar(self):
         raw = {k: v for k, v in self.RAW.items() if k != "lastTrade"}
-        _, price, ts = parse_snapshot(TickerSnapshot.from_dict(raw))
-        assert price == 191.4
-        assert ts == 1763459940.0  # milliseconds -> seconds
+        q = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert q.price == 191.4
+        assert q.timestamp == 1763459940.0  # milliseconds -> seconds
 
     def test_falls_back_to_day_then_prev_close(self):
         raw = {
@@ -238,13 +240,13 @@ class TestParseSnapshot:
             "day": {"c": 191.5},
             "prevDay": {"c": 189.2},
         }
-        _, price, ts = parse_snapshot(TickerSnapshot.from_dict(raw))
-        assert price == 191.5
-        assert ts == 1763460000.0  # from `updated`
+        q = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert q.price == 191.5
+        assert q.timestamp == 1763460000.0  # from `updated`
 
         raw = {"ticker": "AAPL", "day": {"c": 0}, "prevDay": {"c": 189.2}}  # pre-market zeros
-        _, price, _ = parse_snapshot(TickerSnapshot.from_dict(raw))
-        assert price == 189.2
+        q = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert q.price == 189.2
 
     def test_no_usable_price_returns_none(self):
         assert parse_snapshot(TickerSnapshot.from_dict({"ticker": "ZZZZ"})) is None
@@ -257,3 +259,119 @@ class TestParseSnapshot:
         assert to_unix_seconds(1763460000_000_000_000) == 1763460000
         assert to_unix_seconds(None) is None
         assert to_unix_seconds(0) is None
+
+    def test_missing_prev_close_gives_no_reference(self):
+        raw = {"ticker": "AAPL", "lastTrade": {"p": 191.0, "t": 1763460000_000_000_000}}
+        assert parse_snapshot(TickerSnapshot.from_dict(raw)).reference_price is None
+
+
+def _snap_with_prev_close(ticker: str, price: float) -> TickerSnapshot:
+    return TickerSnapshot.from_dict(
+        {
+            "ticker": ticker,
+            "prevDay": {"c": price - 1},
+            "lastTrade": {"p": price, "t": TS_NS},
+        }
+    )
+
+
+@pytest.mark.asyncio
+class TestMassivePolling:
+    """Reference price, missing tickers, backoff and early wake-up."""
+
+    async def test_poll_sets_reference_price_and_tracks_missing(self):
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=60)
+        source._client = MagicMock()
+        source._tickers = ["AAPL", "NOPE"]
+        source._fetch_snapshots = lambda tickers: [_snap_with_prev_close("AAPL", 191.0)]
+
+        await source._poll_once()
+
+        update = cache.get("AAPL")
+        assert update.reference_price == 190.0
+        assert update.day_change_percent == round(1 / 190 * 100, 4)
+        assert source.unpriced_tickers == {"NOPE"}
+
+    async def test_fetch_receives_snapshot_of_tickers(self):
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache(), poll_interval=60)
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        fetch = MagicMock(return_value=[])
+        source._fetch_snapshots = fetch
+
+        await source._poll_once()
+
+        fetch.assert_called_once_with(["AAPL"])
+
+    async def test_ticker_removed_mid_poll_is_not_written(self):
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=60)
+        source._client = MagicMock()
+        source._tickers = ["AAPL", "MSFT"]
+
+        def fetch(tickers):
+            source._tickers = ["AAPL"]  # MSFT removed while the request is in flight
+            return [_snap_with_prev_close(t, 100.0) for t in tickers]
+
+        source._fetch_snapshots = fetch
+        await source._poll_once()
+
+        assert "AAPL" in cache
+        assert "MSFT" not in cache
+
+    async def test_failure_backoff_and_recovery(self):
+        source = MassiveDataSource(
+            api_key="k", price_cache=PriceCache(), poll_interval=10, max_backoff=60
+        )
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        source._fetch_snapshots = MagicMock(side_effect=RuntimeError("429"))
+
+        await source._poll_once()
+        assert source._current_delay() == 20
+        await source._poll_once()
+        assert source._current_delay() == 40
+        await source._poll_once()
+        await source._poll_once()
+        assert source._current_delay() == 60  # capped
+
+        source._fetch_snapshots = lambda tickers: [_snap_with_prev_close("AAPL", 1.0)]
+        await source._poll_once()
+        assert source._current_delay() == 10
+
+    async def test_add_ticker_triggers_early_poll(self):
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=30, min_gap=0.05)
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        source._fetch_snapshots = lambda tickers: [_snap_with_prev_close(t, 10.0) for t in tickers]
+        source._last_poll = asyncio.get_running_loop().time()
+        source._task = asyncio.create_task(source._poll_loop())
+
+        await source.add_ticker("msft")
+        await asyncio.sleep(0.3)  # far less than the 30s interval
+
+        assert cache.get_price("MSFT") == 10.0
+        await source.stop()
+
+    async def test_early_poll_respects_min_gap(self):
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=30, min_gap=0.5)
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        source._fetch_snapshots = lambda tickers: [_snap_with_prev_close(t, 10.0) for t in tickers]
+        source._last_poll = asyncio.get_running_loop().time()
+        source._task = asyncio.create_task(source._poll_loop())
+
+        await source.add_ticker("MSFT")
+        await asyncio.sleep(0.2)
+        assert "MSFT" not in cache  # still inside the minimum gap
+        await asyncio.sleep(0.5)
+        assert cache.get_price("MSFT") == 10.0
+        await source.stop()
+
+    async def test_invalid_ticker_rejected(self):
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache())
+        with pytest.raises(ValueError):
+            await source.add_ticker("$$$")

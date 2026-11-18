@@ -2,7 +2,7 @@
 
 **Scope:** everything under `backend/app/market/`: the unified data-source interface, the shared price cache, the GBM simulator, the Massive (Polygon.io) REST poller, the source factory, the SSE stream endpoint, and how the rest of the backend (watchlist, portfolio, trades, chat) connects to it.
 
-**Status of this document:** This is the reference design. A first version of the subsystem already exists in `backend/app/market/` (summarized in `MARKET_DATA_SUMMARY.md`). This design keeps that module layout and public API. It also specifies a set of **required changes** (listed in §0), including one blocking bug in the Massive client that the current mocked tests don't catch. Every code block below is the target implementation.
+**Status:** Implemented. The changes in §0 (C1–C7) are all in `backend/app/market/`: C1 landed first on its own, and the rest followed. §11–§12 (FastAPI app wiring, and the watchlist/trade/portfolio rules) are guidance for the backend API work, which hasn't been built yet. Where the code and this document differ in small details, the code is authoritative.
 
 ---
 
@@ -1543,7 +1543,7 @@ For Playwright (`test/`), run the container with `LLM_MOCK=true`, no `MASSIVE_AP
 
 | Situation | Behaviour |
 |-----------|-----------|
-| Empty watchlist at startup | Sources start with `[]`. The simulator steps nothing and Massive skips polls. SSE sends `retry` and then only pings until a ticker is added. |
+| Empty watchlist at startup | Sources start with `[]`. The simulator steps nothing and Massive skips polls. SSE sends `retry`, one empty `{}` snapshot, and then only pings until a ticker is added. |
 | Invalid ticker symbol (`"$$$"`) | `normalize_ticker` raises `ValueError`, and the API returns 400 before touching the DB. |
 | Well-formed but nonexistent ticker | Simulator: it gets a random price (acceptable in simulation). Massive: the API returns no data, the ticker shows up in `unpriced_tickers`, and the cache has no entry, so the watchlist shows "—" and trades are rejected with a clear error. The watchlist API may include `"price": null`. |
 | Bad `MASSIVE_API_KEY` | `AuthError`/401 on every poll is logged, with backoff up to 120s. The app still serves and prices show "—". It does **not** silently fall back to the simulator: real and fake prices must never mix. |

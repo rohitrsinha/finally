@@ -4,7 +4,7 @@ import os
 from unittest.mock import patch
 
 from app.market.cache import PriceCache
-from app.market.factory import create_market_data_source
+from app.market.factory import MarketDataConfig, create_market_data_source
 from app.market.massive_client import MassiveDataSource
 from app.market.simulator import SimulatorDataSource
 
@@ -77,3 +77,51 @@ class TestFactory:
 
         assert isinstance(source, MassiveDataSource)
         assert source._cache is cache
+
+
+class TestMarketDataConfig:
+    """Environment-driven configuration."""
+
+    def test_defaults(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = MarketDataConfig.from_env()
+        assert config == MarketDataConfig()
+
+    def test_reads_all_variables(self):
+        env = {
+            "MASSIVE_API_KEY": " key ",
+            "MASSIVE_POLL_INTERVAL": "5",
+            "SIMULATOR_INTERVAL": "0.25",
+            "SIMULATOR_EVENT_PROBABILITY": "0.01",
+            "SIMULATOR_SEED": "42",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            config = MarketDataConfig.from_env()
+        assert config.massive_api_key == "key"
+        assert config.massive_poll_interval == 5.0
+        assert config.simulator_interval == 0.25
+        assert config.simulator_event_probability == 0.01
+        assert config.simulator_seed == 42
+
+    def test_poll_interval_floor_and_invalid_values(self):
+        env = {"MASSIVE_POLL_INTERVAL": "0.5", "SIMULATOR_INTERVAL": "fast", "SIMULATOR_SEED": "x"}
+        with patch.dict(os.environ, env, clear=True):
+            config = MarketDataConfig.from_env()
+        assert config.massive_poll_interval == 2.0
+        assert config.simulator_interval == 0.5
+        assert config.simulator_seed is None
+
+    def test_config_is_passed_to_sources(self):
+        cache = PriceCache()
+        massive = create_market_data_source(
+            cache, MarketDataConfig(massive_api_key="k", massive_poll_interval=3.0)
+        )
+        assert isinstance(massive, MassiveDataSource)
+        assert massive._interval == 3.0
+
+        sim = create_market_data_source(
+            cache, MarketDataConfig(simulator_interval=0.2, simulator_seed=9)
+        )
+        assert isinstance(sim, SimulatorDataSource)
+        assert sim._interval == 0.2
+        assert sim._seed == 9

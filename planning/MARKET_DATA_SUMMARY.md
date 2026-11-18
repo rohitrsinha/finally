@@ -1,6 +1,6 @@
 # Market Data Backend — Summary
 
-**Status:** Complete, tested, reviewed, all issues resolved.
+**Status:** Complete and tested. The design changes C1–C7 in `MARKET_DATA_DESIGN.md` are implemented (see "Design Changes Applied" below).
 
 ## What Was Built
 
@@ -44,20 +44,34 @@ MarketDataSource (ABC)
 
 ## Test Suite
 
-**73 tests, all passing.** 6 test modules in `backend/tests/market/`.
+**130 tests, all passing.** 8 test modules in `backend/tests/market/`.
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
-| test_models.py | 11 | models.py: 100% |
-| test_cache.py | 13 | cache.py: 100% |
-| test_simulator.py | 17 | simulator.py: 98% |
-| test_simulator_source.py | 10 | (integration tests) |
-| test_factory.py | 7 | factory.py: 100% |
-| test_massive.py | 13 | massive_client.py: 56% (expected — API methods mocked) |
+| test_models.py | 15 | models.py: 100% |
+| test_cache.py | 20 | cache.py: 100% |
+| test_interface.py | 12 | interface.py: 96% |
+| test_simulator.py | 25 | simulator.py: 98% |
+| test_simulator_source.py | 15 | (integration tests) |
+| test_factory.py | 11 | factory.py: 100% |
+| test_massive.py | 26 | massive_client.py: 98% (SDK calls mocked; snapshots are real `TickerSnapshot` objects) |
+| test_stream.py | 6 | stream.py: 95% |
 
-Overall coverage: 84%.
+Overall coverage: 98%.
 
-## Code Review & Fixes Applied
+## Design Changes Applied
+
+These are from `MARKET_DATA_DESIGN.md` §0:
+
+- **C1** — Massive snapshot parsing uses the real SDK fields (`last_trade.sip_timestamp`, in ns), with price fallbacks and timestamp-unit normalization.
+- **C2** — Daily change: `PriceUpdate.reference_price` plus `day_change` / `day_change_percent`. The baseline is the previous close (Massive) or the first price seen (simulator).
+- **C3** — `create_stream_router()` builds a new router on every call. SSE frames are named `prices` events with `id:` lines, and a `: ping` heartbeat is sent after 15s without data.
+- **C4** — Massive: early poll on `add_ticker()` (respecting a 12s minimum gap), exponential backoff on failures (capped at 120s), `MASSIVE_POLL_INTERVAL`, `unpriced_tickers`, and dropping tickers removed while a poll is in flight.
+- **C5** — `normalize_ticker()` is shared by both sources and exported for the API layer.
+- **C6** — The cache respects `timestamp=0.0`, reads `version` under the lock, and bumps the version on `remove()`.
+- **C7** — The simulator uses an injected `np.random.Generator` (`seed=` / `SIMULATOR_SEED`) for deterministic runs.
+
+## Earlier Code Review & Fixes
 
 A comprehensive code review identified 7 issues. All were resolved:
 
@@ -87,11 +101,11 @@ from app.market import PriceCache, create_market_data_source
 
 # Startup
 cache = PriceCache()
-source = create_market_data_source(cache)  # Reads MASSIVE_API_KEY
+source = create_market_data_source(cache)  # Reads MASSIVE_API_KEY etc. from env
 await source.start(["AAPL", "GOOGL", "MSFT", ...])
 
 # Read prices
-update = cache.get("AAPL")          # PriceUpdate or None
+update = cache.get("AAPL")          # PriceUpdate or None (update.day_change_percent for watchlist)
 price = cache.get_price("AAPL")     # float or None
 all_prices = cache.get_all()        # dict[str, PriceUpdate]
 

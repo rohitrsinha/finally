@@ -75,3 +75,27 @@ class TestPriceUpdate:
 
         with pytest.raises(AttributeError):
             update.price = 200.00  # Should raise error
+
+
+class TestDailyChange:
+    """reference_price-based daily change fields."""
+
+    def test_day_change_from_reference(self):
+        update = PriceUpdate("AAPL", price=191.20, previous_price=191.05, reference_price=190.00)
+        assert update.day_change == 1.2
+        assert update.day_change_percent == 0.6316
+
+    def test_day_change_none_without_reference(self):
+        update = PriceUpdate("AAPL", price=191.20, previous_price=191.05)
+        assert update.day_change is None
+        assert update.day_change_percent is None
+
+    def test_zero_reference_gives_none_percent(self):
+        update = PriceUpdate("AAPL", price=1.0, previous_price=1.0, reference_price=0.0)
+        assert update.day_change_percent is None
+
+    def test_to_dict_includes_daily_fields(self):
+        result = PriceUpdate("AAPL", 191.0, 190.0, 1.0, reference_price=189.0).to_dict()
+        assert result["reference_price"] == 189.0
+        assert result["day_change"] == 2.0
+        assert result["day_change_percent"] == round(2 / 189 * 100, 4)
