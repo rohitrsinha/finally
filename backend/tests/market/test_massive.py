@@ -3,19 +3,27 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from massive.rest.models import TickerSnapshot
 
 from app.market.cache import PriceCache
-from app.market.massive_client import MassiveDataSource
+from app.market.massive_client import MassiveDataSource, parse_snapshot, to_unix_seconds
 
 
-def _make_snapshot(ticker: str, price: float, timestamp_ms: int) -> MagicMock:
-    """Create a mock Massive snapshot object."""
-    snap = MagicMock()
-    snap.ticker = ticker
-    snap.last_trade = MagicMock()
-    snap.last_trade.price = price
-    snap.last_trade.timestamp = timestamp_ms
-    return snap
+def _make_snapshot(ticker: str, price: float, timestamp_ns: int) -> TickerSnapshot:
+    """Build a real massive TickerSnapshot from raw API JSON.
+
+    Uses the SDK's own parser so tests exercise the real field names
+    (last_trade.sip_timestamp, in nanoseconds) rather than a permissive mock.
+    """
+    return TickerSnapshot.from_dict(
+        {
+            "ticker": ticker,
+            "lastTrade": {"p": price, "s": 100, "x": 4, "t": timestamp_ns},
+        }
+    )
+
+
+TS_NS = 1707580800_000_000_000  # 2024-02-10T16:00:00Z in nanoseconds
 
 
 @pytest.mark.asyncio
@@ -34,8 +42,8 @@ class TestMassiveDataSource:
         source._client = MagicMock()  # Satisfy the _poll_once guard
 
         mock_snapshots = [
-            _make_snapshot("AAPL", 190.50, 1707580800000),
-            _make_snapshot("GOOGL", 175.25, 1707580800000),
+            _make_snapshot("AAPL", 190.50, TS_NS),
+            _make_snapshot("GOOGL", 175.25, TS_NS),
         ]
 
         with patch.object(source, "_fetch_snapshots", return_value=mock_snapshots):
@@ -55,10 +63,8 @@ class TestMassiveDataSource:
         source._tickers = ["AAPL", "BAD"]
         source._client = MagicMock()  # Satisfy the _poll_once guard
 
-        good_snap = _make_snapshot("AAPL", 190.50, 1707580800000)
-        bad_snap = MagicMock()
-        bad_snap.ticker = "BAD"
-        bad_snap.last_trade = None  # Will cause AttributeError
+        good_snap = _make_snapshot("AAPL", 190.50, TS_NS)
+        bad_snap = TickerSnapshot.from_dict({"ticker": "BAD"})  # no price anywhere
 
         with patch.object(source, "_fetch_snapshots", return_value=[good_snap, bad_snap]):
             await source._poll_once()
@@ -84,7 +90,7 @@ class TestMassiveDataSource:
         assert cache.get_price("AAPL") is None  # No update happened
 
     async def test_timestamp_conversion(self):
-        """Test that timestamps are converted from milliseconds to seconds."""
+        """Test that nanosecond trade timestamps are converted to seconds."""
         cache = PriceCache()
         source = MassiveDataSource(
             api_key="test-key",
@@ -94,7 +100,7 @@ class TestMassiveDataSource:
         source._tickers = ["AAPL"]
         source._client = MagicMock()  # Satisfy the _poll_once guard
 
-        mock_snapshots = [_make_snapshot("AAPL", 190.50, 1707580800000)]
+        mock_snapshots = [_make_snapshot("AAPL", 190.50, TS_NS)]
 
         with patch.object(source, "_fetch_snapshots", return_value=mock_snapshots):
             await source._poll_once()
@@ -189,7 +195,7 @@ class TestMassiveDataSource:
         cache = PriceCache()
         source = MassiveDataSource(api_key="test-key", price_cache=cache, poll_interval=60.0)
 
-        mock_snapshots = [_make_snapshot("AAPL", 190.50, 1707580800000)]
+        mock_snapshots = [_make_snapshot("AAPL", 190.50, TS_NS)]
 
         with patch("app.market.massive_client.RESTClient"):
             with patch.object(source, "_fetch_snapshots", return_value=mock_snapshots):
@@ -199,3 +205,55 @@ class TestMassiveDataSource:
         assert cache.get_price("AAPL") == 190.50
 
         await source.stop()
+
+
+class TestParseSnapshot:
+    """parse_snapshot() against real SDK model objects."""
+
+    RAW = {
+        "ticker": "AAPL",
+        "updated": 1763460000_123456789,
+        "day": {"o": 189.1, "h": 192.0, "l": 188.4, "c": 191.5, "v": 4.8e7},
+        "prevDay": {"c": 189.2},
+        "min": {"c": 191.4, "t": 1763459940_000},
+        "lastTrade": {"p": 191.52, "s": 100, "x": 4, "t": 1763460000_123456789},
+    }
+
+    def test_uses_last_trade_price_and_sip_timestamp(self):
+        ticker, price, ts = parse_snapshot(TickerSnapshot.from_dict(self.RAW))
+        assert ticker == "AAPL"
+        assert price == 191.52
+        assert abs(ts - 1763460000.123456789) < 1e-6
+
+    def test_falls_back_to_minute_bar(self):
+        raw = {k: v for k, v in self.RAW.items() if k != "lastTrade"}
+        _, price, ts = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert price == 191.4
+        assert ts == 1763459940.0  # milliseconds -> seconds
+
+    def test_falls_back_to_day_then_prev_close(self):
+        raw = {
+            "ticker": "AAPL",
+            "updated": 1763460000_000_000_000,
+            "day": {"c": 191.5},
+            "prevDay": {"c": 189.2},
+        }
+        _, price, ts = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert price == 191.5
+        assert ts == 1763460000.0  # from `updated`
+
+        raw = {"ticker": "AAPL", "day": {"c": 0}, "prevDay": {"c": 189.2}}  # pre-market zeros
+        _, price, _ = parse_snapshot(TickerSnapshot.from_dict(raw))
+        assert price == 189.2
+
+    def test_no_usable_price_returns_none(self):
+        assert parse_snapshot(TickerSnapshot.from_dict({"ticker": "ZZZZ"})) is None
+        assert parse_snapshot(TickerSnapshot.from_dict({"lastTrade": {"p": 1.0}})) is None
+
+    def test_to_unix_seconds_units(self):
+        assert to_unix_seconds(1763460000) == 1763460000
+        assert to_unix_seconds(1763460000_000) == 1763460000
+        assert to_unix_seconds(1763460000_000_000) == 1763460000
+        assert to_unix_seconds(1763460000_000_000_000) == 1763460000
+        assert to_unix_seconds(None) is None
+        assert to_unix_seconds(0) is None
