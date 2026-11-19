@@ -206,7 +206,7 @@ These aren't defects in this module, but the next agents need to know them:
 
 ## 8. Resolution
 
-Every finding was fixed, and each fix has a regression test. **155 tests pass** (130 → 155), coverage is **99%**, and `ruff check` and `ruff format --check` are clean. The suite passes on both **Python 3.13 and 3.12**. 15 of the new tests were run against the old source and confirmed to fail there; the remaining 2 cover new forward behaviour.
+Every finding was fixed, and each fix has a regression test. **155 tests pass** (130 → 155), coverage is **99%**, and `ruff check` and `ruff format --check` are clean. The suite passes on both **Python 3.13 and 3.12**. The new tests were run against the old source: 16 of the 17 targeted tests fail there, and the remaining one covers new forward behaviour.
 
 | # | Fix | Where | Test |
 |---|---|---|---|
