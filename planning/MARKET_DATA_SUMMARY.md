@@ -44,7 +44,9 @@ MarketDataSource (ABC)
 
 ## Test Suite
 
-**130 tests, all passing.** 8 test modules in `backend/tests/market/`.
+**155 tests, all passing** (Python 3.12 and 3.13). 8 test modules in `backend/tests/market/`. Overall coverage: 99%.
+
+Per-module counts and coverage below are from the first round; the round-2 review added 25 regression tests (see `MARKET_DATA_REVIEW.md` §8).
 
 | Module | Tests | Coverage |
 |--------|-------|----------|
@@ -57,7 +59,6 @@ MarketDataSource (ABC)
 | test_massive.py | 26 | massive_client.py: 98% (SDK calls mocked; snapshots are real `TickerSnapshot` objects) |
 | test_stream.py | 6 | stream.py: 95% |
 
-Overall coverage: 98%.
 
 ## Design Changes Applied
 
@@ -82,6 +83,16 @@ A comprehensive code review identified 7 issues. All were resolved:
 5. **Correlation constants cleaned up** — removed unused `DEFAULT_CORR`, consolidated into `CROSS_GROUP_CORR`
 6. **Unused test imports removed** — `pytest`, `math`, `asyncio` cleaned from 4 test files
 7. **Massive test mocks fixed** — `source._client` set in tests, patches target correct names
+
+## Round 2 Review & Fixes
+
+`planning/MARKET_DATA_REVIEW.md` found 11 issues (1 high, 2 medium, 6 low, 2 trivial). All are fixed:
+
+- **High** — Massive poll loop busy-spun at 100% CPU when no tickers were tracked; it now idles until `add_ticker()`.
+- `start()` twice raises `RuntimeError`; `add_ticker()`/`remove_ticker()` before `start()` are honoured by both sources.
+- Simulator `dt` follows `update_interval`; `SIMULATOR_INTERVAL` / `SIMULATOR_EVENT_PROBABILITY` are clamped.
+- `normalize_ticker()` raises `ValueError` for non-strings and rejects trailing punctuation.
+- Prices under $1 keep 4 decimals (`round_price()`); `unpriced_tickers` ignores tickers removed mid-poll; early polls respect failure backoff; SSE no longer swallows `CancelledError`.
 
 ## Demo
 

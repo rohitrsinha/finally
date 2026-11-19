@@ -23,16 +23,16 @@ from app.market import (
 - **`PriceUpdate`** — Immutable dataclass: `ticker`, `price`, `previous_price`, `timestamp`, `reference_price` (previous close for Massive, first price seen this session for the simulator), plus properties `change`, `change_percent`, `direction` ("up"/"down"/"flat") for tick-over-tick moves, `day_change` / `day_change_percent` for the daily change, and `to_dict()` for JSON serialization.
 
 - **`PriceCache`** — Thread-safe in-memory store. Key methods:
-  - `update(ticker, price, timestamp=None, reference_price=None) -> PriceUpdate` (reference price is kept from the previous update when omitted)
+  - `update(ticker, price, timestamp=None, reference_price=None) -> PriceUpdate` (reference price is kept from the previous update when omitted; prices are rounded to cents, or 4 decimals below $1)
   - `get(ticker) -> PriceUpdate | None`
   - `get_price(ticker) -> float | None`
   - `get_all() -> dict[str, PriceUpdate]`
   - `remove(ticker)` (bumps the version so SSE clients see the removal)
   - `version` property — monotonic counter, increments on every change (for SSE change detection)
 
-- **`MarketDataSource`** — Abstract interface implemented by `SimulatorDataSource` and `MassiveDataSource`. Lifecycle: `start(tickers)` -> `add_ticker()` / `remove_ticker()` -> `stop()`.
+- **`MarketDataSource`** — Abstract interface implemented by `SimulatorDataSource` and `MassiveDataSource`. Lifecycle: `start(tickers)` -> `add_ticker()` / `remove_ticker()` -> `stop()`. `start()` may be called only once per instance (a second call raises `RuntimeError`); ticker changes made before `start()` are applied when it runs.
 
-- **`normalize_ticker(raw)`** — Upper-cases and strips a symbol; raises `ValueError` if invalid. Use it in API routes before touching the DB. Both sources apply it too.
+- **`normalize_ticker(raw)`** — Upper-cases and strips a symbol; raises `ValueError` if invalid, including non-string input such as a `null` ticker from the LLM. Use it in API routes before touching the DB. Both sources apply it too.
 
 - **`create_market_data_source(cache, config=None)`** — Factory. Returns `MassiveDataSource` if `MASSIVE_API_KEY` is set, otherwise `SimulatorDataSource`. `config` defaults to `MarketDataConfig.from_env()`, which reads `MASSIVE_POLL_INTERVAL`, `SIMULATOR_INTERVAL`, `SIMULATOR_EVENT_PROBABILITY` and `SIMULATOR_SEED`.
 

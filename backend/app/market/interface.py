@@ -5,17 +5,22 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 
-_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+# A letter, then letters/digits, optionally one '.' or '-' class suffix (BRK.B, BF-B)
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9]*(?:[.\-][A-Z0-9]+)?$")
+_MAX_TICKER_LEN = 10
 
 
-def normalize_ticker(raw: str) -> str:
+def normalize_ticker(raw: object) -> str:
     """Upper-case and strip a ticker symbol; raise ValueError if it is invalid.
 
     Used by both data sources and by the API layer, so 'tsla ', 'TSLA' and 'Tsla'
     are the same ticker everywhere. Accepts class shares such as 'BRK.B' and 'BF-B'.
+    Non-string input (e.g. a null ticker from LLM output) also raises ValueError.
     """
+    if not isinstance(raw, str):
+        raise ValueError(f"Invalid ticker symbol: {raw!r}")
     ticker = raw.strip().upper()
-    if not _TICKER_RE.match(ticker):
+    if len(ticker) > _MAX_TICKER_LEN or not _TICKER_RE.match(ticker):
         raise ValueError(f"Invalid ticker symbol: {raw!r}")
     return ticker
 
@@ -42,7 +47,9 @@ class MarketDataSource(ABC):
         """Begin producing price updates for the given tickers.
 
         Starts a background task that periodically writes to the PriceCache.
-        Must be called exactly once. Calling start() twice is undefined behavior.
+        Tickers added or removed before start() are applied on top of `tickers`.
+        Must be called at most once per instance: a second call raises
+        RuntimeError (create a new source instead).
         """
 
     @abstractmethod
@@ -57,7 +64,8 @@ class MarketDataSource(ABC):
     async def add_ticker(self, ticker: str) -> None:
         """Add a ticker to the active set. No-op if already present.
 
-        The next update cycle will include this ticker.
+        The next update cycle will include this ticker. May be called before
+        start(); the ticker is then tracked from the moment start() runs.
         """
 
     @abstractmethod

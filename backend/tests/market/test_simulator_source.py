@@ -128,9 +128,7 @@ class TestSimulatorDataSource:
         """Test creating source with custom event probability."""
         cache = PriceCache()
         # Very high event probability for testing
-        source = SimulatorDataSource(
-            price_cache=cache, update_interval=0.1, event_probability=1.0
-        )
+        source = SimulatorDataSource(price_cache=cache, update_interval=0.1, event_probability=1.0)
         await source.start(["AAPL"])
 
         # Just verify it starts and stops cleanly
@@ -184,3 +182,43 @@ class TestSimulatorNormalization:
         assert update.reference_price == 190.0
         assert update.day_change_percent is not None
         await source.stop()
+
+
+@pytest.mark.asyncio
+class TestSimulatorLifecycleRegressions:
+    """Regressions from planning/MARKET_DATA_REVIEW.md (round 2)."""
+
+    async def test_double_start_raises(self):
+        """3.2: a second start() must not leak the first task."""
+        source = SimulatorDataSource(price_cache=PriceCache(), update_interval=10)
+        await source.start(["AAPL"])
+        first_task = source._task
+        with pytest.raises(RuntimeError):
+            await source.start(["AAPL"])
+        await source.stop()
+        assert first_task.done()
+
+    async def test_add_and_remove_before_start(self):
+        """3.3: pre-start changes are applied when start() runs (same as Massive)."""
+        cache = PriceCache()
+        source = SimulatorDataSource(price_cache=cache, update_interval=10)
+        await source.add_ticker("pypl")
+        await source.add_ticker("PYPL")
+        await source.add_ticker("SQ")
+        await source.remove_ticker("SQ")
+        assert source.get_tickers() == ["PYPL"]
+        await source.start(["AAPL"])
+        assert source.get_tickers() == ["AAPL", "PYPL"]
+        assert cache.get_price("PYPL") is not None
+        await source.stop()
+
+    async def test_dt_follows_update_interval(self):
+        """3.4: simulated time per step matches wall-clock time per step."""
+        source = SimulatorDataSource(price_cache=PriceCache(), update_interval=2.0)
+        await source.start(["AAPL"])
+        assert source._sim._dt == pytest.approx(2.0 / 5_896_800)
+        await source.stop()
+
+    async def test_non_positive_interval_rejected(self):
+        with pytest.raises(ValueError):
+            SimulatorDataSource(price_cache=PriceCache(), update_interval=0)

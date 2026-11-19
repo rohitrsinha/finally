@@ -87,7 +87,7 @@ async def generate_price_events(
                 yield ": ping\n\n"  # SSE comment: ignored by EventSource
                 last_sent = loop.time()
             await asyncio.sleep(interval)
-    except asyncio.CancelledError:
-        pass
     finally:
+        # Runs on normal disconnect and on cancellation (server shutdown);
+        # CancelledError is deliberately not swallowed.
         logger.info("SSE client disconnected: %s", client_ip)

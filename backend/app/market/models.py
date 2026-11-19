@@ -9,6 +9,15 @@ from typing import Literal
 Direction = Literal["up", "down", "flat"]
 
 
+def round_price(price: float) -> float:
+    """Round a price for storage/display: cents at $1+, 4 decimals below $1.
+
+    Plain cent rounding would turn a $0.0042 penny stock into 0.0, which would
+    break valuation, fills and the daily-change baseline.
+    """
+    return round(price, 2) if abs(price) >= 1 else round(price, 4)
+
+
 @dataclass(frozen=True, slots=True)
 class PriceUpdate:
     """Immutable snapshot of one ticker's price at a point in time.

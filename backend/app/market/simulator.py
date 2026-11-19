@@ -10,6 +10,7 @@ import numpy as np
 
 from .cache import PriceCache
 from .interface import MarketDataSource, normalize_ticker
+from .models import round_price
 from .seed_prices import (
     CORRELATION_GROUPS,
     CROSS_GROUP_CORR,
@@ -119,7 +120,7 @@ class GBMSimulator:
                     "up" if shock_sign > 0 else "down",
                 )
 
-            result[ticker] = round(self._prices[ticker], 2)
+            result[ticker] = round_price(self._prices[ticker])
 
         return result
 
@@ -207,7 +208,9 @@ class SimulatorDataSource(MarketDataSource):
     """MarketDataSource backed by the GBM simulator.
 
     Runs a background asyncio task that calls GBMSimulator.step() every
-    `update_interval` seconds and writes results to the PriceCache.
+    `update_interval` seconds and writes results to the PriceCache. Each step
+    advances simulated time by the same `update_interval`, so the tuned
+    volatilities hold whatever the cadence.
     """
 
     def __init__(
@@ -217,18 +220,27 @@ class SimulatorDataSource(MarketDataSource):
         event_probability: float = 0.001,
         seed: int | None = None,
     ) -> None:
+        if update_interval <= 0:
+            raise ValueError(f"update_interval must be positive, got {update_interval}")
         self._cache = price_cache
         self._interval = update_interval
         self._event_prob = event_probability
         self._seed = seed
         self._sim: GBMSimulator | None = None
         self._task: asyncio.Task | None = None
+        self._started = False
+        self._pending: list[str] = []  # tickers added before start()
 
     async def start(self, tickers: list[str]) -> None:
-        # Normalize and de-duplicate while keeping order
-        tickers = list(dict.fromkeys(normalize_ticker(t) for t in tickers))
+        if self._started:
+            raise RuntimeError("SimulatorDataSource.start() called twice")
+        self._started = True
+        # Normalize and de-duplicate while keeping order; include pre-start adds
+        tickers = list(dict.fromkeys([*(normalize_ticker(t) for t in tickers), *self._pending]))
+        self._pending = []
         self._sim = GBMSimulator(
             tickers=tickers,
+            dt=self._interval / GBMSimulator.TRADING_SECONDS_PER_YEAR,
             event_probability=self._event_prob,
             seed=self._seed,
         )
@@ -252,7 +264,11 @@ class SimulatorDataSource(MarketDataSource):
 
     async def add_ticker(self, ticker: str) -> None:
         ticker = normalize_ticker(ticker)
-        if self._sim and ticker not in self._sim.get_tickers():
+        if self._sim is None:
+            if ticker not in self._pending:
+                self._pending.append(ticker)  # applied when start() runs
+            return
+        if ticker not in self._sim.get_tickers():
             self._sim.add_ticker(ticker)
             # Seed cache immediately so the ticker has a price right away
             price = self._sim.get_price(ticker)
@@ -264,11 +280,13 @@ class SimulatorDataSource(MarketDataSource):
         ticker = normalize_ticker(ticker)
         if self._sim:
             self._sim.remove_ticker(ticker)
+        elif ticker in self._pending:
+            self._pending.remove(ticker)
         self._cache.remove(ticker)
         logger.info("Simulator: removed ticker %s", ticker)
 
     def get_tickers(self) -> list[str]:
-        return self._sim.get_tickers() if self._sim else []
+        return self._sim.get_tickers() if self._sim else list(self._pending)
 
     async def _run_loop(self) -> None:
         """Core loop: step the simulation, write to cache, sleep."""
