@@ -1,6 +1,6 @@
 # Market Data Backend — Summary
 
-**Status:** Complete and tested. The design changes C1–C7 in `MARKET_DATA_DESIGN.md` are implemented (see "Design Changes Applied" below).
+**Status:** Complete and tested. The design changes C1–C7 in `MARKET_DATA_DESIGN.md` and all round-2 review fixes (R1–R11, `MARKET_DATA_REVIEW.md`) are implemented and merged (PR #7).
 
 ## What Was Built
 
@@ -46,19 +46,18 @@ MarketDataSource (ABC)
 
 **155 tests, all passing** (Python 3.12 and 3.13). 8 test modules in `backend/tests/market/`. Overall coverage: 99%.
 
-Per-module counts and coverage below are from the first round; the round-2 review added 25 regression tests (see `MARKET_DATA_REVIEW.md` §8).
-
 | Module | Tests | Coverage |
 |--------|-------|----------|
 | test_models.py | 15 | models.py: 100% |
-| test_cache.py | 20 | cache.py: 100% |
-| test_interface.py | 12 | interface.py: 96% |
+| test_cache.py | 22 | cache.py: 100% |
+| test_interface.py | 21 | interface.py: 96% |
 | test_simulator.py | 25 | simulator.py: 98% |
-| test_simulator_source.py | 15 | (integration tests) |
-| test_factory.py | 11 | factory.py: 100% |
-| test_massive.py | 26 | massive_client.py: 98% (SDK calls mocked; snapshots are real `TickerSnapshot` objects) |
-| test_stream.py | 6 | stream.py: 95% |
+| test_simulator_source.py | 19 | (integration tests) |
+| test_factory.py | 13 | factory.py: 100% |
+| test_massive.py | 33 | massive_client.py: 99% (SDK calls mocked; snapshots are real `TickerSnapshot` objects) |
+| test_stream.py | 7 | stream.py: 97% |
 
+The round-2 review added 25 regression tests (see `MARKET_DATA_REVIEW.md` §8).
 
 ## Design Changes Applied
 
@@ -120,10 +119,10 @@ update = cache.get("AAPL")          # PriceUpdate or None (update.day_change_per
 price = cache.get_price("AAPL")     # float or None
 all_prices = cache.get_all()        # dict[str, PriceUpdate]
 
-# Dynamic watchlist
+# Dynamic watchlist (also allowed before start(); applied when it runs)
 await source.add_ticker("TSLA")
 await source.remove_ticker("GOOGL")
 
-# Shutdown
+# Shutdown (a source can only be started once; create a new one to restart)
 await source.stop()
 ```
