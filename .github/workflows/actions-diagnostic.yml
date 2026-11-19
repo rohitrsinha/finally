@@ -1,0 +1,13 @@
+name: Actions diagnostic
+
+# Temporary: checks whether GitHub Actions creates runs at all in this repo.
+on:
+  push:
+    branches: [claude/adoring-fermi-9mkt0q]
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Actions is running for ${{ github.repository }} (event=${{ github.event_name }})"
