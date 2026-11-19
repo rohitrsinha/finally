@@ -23,7 +23,25 @@ Single Docker container serving everything on port 8000:
 - **AI**: LiteLLM → OpenRouter (Cerebras inference) with structured outputs
 - **Market data**: Built-in GBM simulator (default) or Massive API (optional)
 
-## Quick Start
+## Status
+
+| Component | State |
+|---|---|
+| Market data (simulator, Massive client, price cache, SSE stream) | ✅ Built and reviewed: 155 tests, 99% coverage. See `planning/MARKET_DATA_SUMMARY.md` |
+| Database, portfolio/watchlist/chat APIs, LLM integration | ⏳ Not started |
+| Frontend | ⏳ Not started |
+| Dockerfile, start/stop scripts, E2E tests | ⏳ Not started |
+
+The Quick Start below describes the target workflow. It needs the Dockerfile, which isn't written yet. For now you can run the backend tests and the market data demo:
+
+```bash
+cd backend
+uv sync --extra dev
+uv run --extra dev pytest          # 155 tests
+uv run market_data_demo.py         # live terminal dashboard of simulated prices
+```
+
+## Quick Start (target)
 
 ```bash
 # Clone and configure
@@ -44,6 +62,8 @@ docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
 | `OPENROUTER_API_KEY` | Yes | OpenRouter API key for AI chat |
 | `MASSIVE_API_KEY` | No | Massive (Polygon.io) key for real market data; omit to use simulator |
 | `LLM_MOCK` | No | Set `true` for deterministic mock LLM responses (testing) |
+
+Optional market data tuning (`MASSIVE_POLL_INTERVAL`, `SIMULATOR_INTERVAL`, `SIMULATOR_EVENT_PROBABILITY`, `SIMULATOR_SEED`) is documented in `.env.example` and `backend/CLAUDE.md`.
 
 ## Project Structure
 

@@ -34,9 +34,9 @@ from app.market import (
 
 - **`normalize_ticker(raw)`** — Upper-cases and strips a symbol; raises `ValueError` if invalid, including non-string input such as a `null` ticker from the LLM. Use it in API routes before touching the DB. Both sources apply it too.
 
-- **`create_market_data_source(cache, config=None)`** — Factory. Returns `MassiveDataSource` if `MASSIVE_API_KEY` is set, otherwise `SimulatorDataSource`. `config` defaults to `MarketDataConfig.from_env()`, which reads `MASSIVE_POLL_INTERVAL`, `SIMULATOR_INTERVAL`, `SIMULATOR_EVENT_PROBABILITY` and `SIMULATOR_SEED`.
+- **`create_market_data_source(cache, config=None)`** — Factory. Returns `MassiveDataSource` if `MASSIVE_API_KEY` is set, otherwise `SimulatorDataSource`. `config` defaults to `MarketDataConfig.from_env()`, which reads `MASSIVE_POLL_INTERVAL` (floor 2s), `SIMULATOR_INTERVAL` (floor 0.05s; the GBM `dt` follows it), `SIMULATOR_EVENT_PROBABILITY` (clamped to 0–1) and `SIMULATOR_SEED`.
 
-- **Massive specifics** — Polls every 15s by default. `add_ticker()` triggers an early poll, never sooner than 12s after the previous one (free tier: 5 req/min). Repeated failures back off exponentially up to 120s. `unpriced_tickers` lists tracked tickers the API returned no data for.
+- **Massive specifics** — Polls every 15s by default. `add_ticker()` triggers an early poll, never sooner than 12s after the previous one (free tier: 5 req/min). Repeated failures back off exponentially up to 120s, and an `add_ticker()` wake-up waits out the backoff. With no tracked tickers the poll loop idles (no requests, no CPU) until a ticker is added. `unpriced_tickers` lists tracked tickers the API returned no data for (tickers removed mid-poll are excluded).
 
 ### SSE Streaming
 
