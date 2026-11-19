@@ -94,3 +94,23 @@ def test_router_factory_is_independent():
     assert r1 is not r2
     assert len(r1.routes) == len(r2.routes) == 1
     assert r1.routes[0].path == "/api/stream/prices"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates():
+    """3.9: server shutdown cancels the consumer; the generator must not swallow it."""
+    cache = PriceCache()
+    cache.update("AAPL", 190.0)
+
+    async def consume():
+        async for _ in generate_price_events(
+            cache, FakeRequest(10_000), interval=0.01, heartbeat=60.0
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelled()

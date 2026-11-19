@@ -41,8 +41,11 @@ class MarketDataConfig:
         return cls(
             massive_api_key=os.environ.get("MASSIVE_API_KEY", "").strip(),
             massive_poll_interval=max(2.0, _float_env("MASSIVE_POLL_INTERVAL", 15.0)),
-            simulator_interval=_float_env("SIMULATOR_INTERVAL", 0.5),
-            simulator_event_probability=_float_env("SIMULATOR_EVENT_PROBABILITY", 0.001),
+            # Floor keeps 0/negative values from turning the loop into a busy spin
+            simulator_interval=max(0.05, _float_env("SIMULATOR_INTERVAL", 0.5)),
+            simulator_event_probability=min(
+                1.0, max(0.0, _float_env("SIMULATOR_EVENT_PROBABILITY", 0.001))
+            ),
             simulator_seed=int(seed) if seed.isdigit() else None,
         )
 

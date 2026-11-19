@@ -375,3 +375,117 @@ class TestMassivePolling:
         source = MassiveDataSource(api_key="k", price_cache=PriceCache())
         with pytest.raises(ValueError):
             await source.add_ticker("$$$")
+
+
+@pytest.mark.asyncio
+class TestMassiveLifecycleRegressions:
+    """Regressions from planning/MARKET_DATA_REVIEW.md (round 2)."""
+
+    async def test_empty_watchlist_does_not_busy_loop(self):
+        """3.1: with no tickers the poll loop must idle, not spin."""
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache(), poll_interval=15.0)
+        calls = 0
+        original = source._poll_once
+
+        async def counting_poll():
+            nonlocal calls
+            calls += 1
+            await original()
+
+        source._poll_once = counting_poll
+        with patch("app.market.massive_client.RESTClient"):
+            await source.start([])
+        await asyncio.sleep(0.2)
+        assert calls <= 2  # previously ~17,000 in 0.2s
+        await source.stop()
+
+    async def test_idle_loop_wakes_on_add_ticker(self):
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=30, min_gap=0.05)
+        with patch("app.market.massive_client.RESTClient"):
+            with patch.object(
+                source,
+                "_fetch_snapshots",
+                side_effect=lambda tickers: [_snap_with_prev_close(t, 10.0) for t in tickers],
+            ):
+                await source.start([])
+                await source.add_ticker("AAPL")
+                await asyncio.sleep(0.3)
+                assert cache.get_price("AAPL") == 10.0
+                await source.stop()
+
+    async def test_removing_all_tickers_idles(self):
+        """Once the last poll is older than poll_interval, an empty list used to spin."""
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache(), poll_interval=0.05)
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        source._fetch_snapshots = MagicMock(return_value=[])
+        calls = 0
+        original = source._poll_once
+
+        async def counting_poll():
+            nonlocal calls
+            calls += 1
+            await original()
+
+        source._poll_once = counting_poll
+        source._task = asyncio.create_task(source._poll_loop())
+        await source.remove_ticker("AAPL")
+        await asyncio.sleep(0.3)  # six poll intervals
+        assert calls <= 2
+        await source.stop()
+
+    async def test_double_start_raises(self):
+        """3.2: a second start() must not leak the first poll task."""
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache(), poll_interval=60)
+        with patch("app.market.massive_client.RESTClient"):
+            with patch.object(source, "_fetch_snapshots", return_value=[]):
+                await source.start(["AAPL"])
+                with pytest.raises(RuntimeError):
+                    await source.start(["AAPL"])
+        await source.stop()
+
+    async def test_add_ticker_before_start_is_kept(self):
+        """3.3: pre-start adds are merged into the start() list."""
+        cache = PriceCache()
+        source = MassiveDataSource(api_key="k", price_cache=cache, poll_interval=60)
+        await source.add_ticker("pypl")
+        fetch = MagicMock(
+            side_effect=lambda tickers: [_snap_with_prev_close(t, 10.0) for t in tickers]
+        )
+        with patch("app.market.massive_client.RESTClient"):
+            with patch.object(source, "_fetch_snapshots", fetch):
+                await source.start(["AAPL", "PYPL"])
+                assert source.get_tickers() == ["AAPL", "PYPL"]
+                assert cache.get_price("PYPL") == 10.0
+                assert not source._wake.is_set()  # first poll covered the early add
+                await source.stop()
+
+    async def test_unpriced_excludes_ticker_removed_mid_poll(self):
+        """3.5"""
+        source = MassiveDataSource(api_key="k", price_cache=PriceCache())
+        source._client = MagicMock()
+        source._tickers = ["AAPL", "MSFT"]
+
+        def fetch(tickers):
+            source._tickers = ["AAPL"]  # MSFT removed while the request is in flight
+            return [_snap_with_prev_close("AAPL", 10.0)]
+
+        source._fetch_snapshots = fetch
+        await source._poll_once()
+        assert source.unpriced_tickers == set()
+
+    async def test_early_wake_respects_backoff(self):
+        """3.8: an add_ticker() wake-up waits out the failure backoff, not just min_gap."""
+        source = MassiveDataSource(
+            api_key="k", price_cache=PriceCache(), poll_interval=0.2, min_gap=0.01
+        )
+        source._client = MagicMock()
+        source._tickers = ["AAPL"]
+        source._fetch_snapshots = MagicMock(side_effect=RuntimeError("401"))
+        await source._poll_once()  # 1 failure -> backoff 0.4s
+        source._task = asyncio.create_task(source._poll_loop())
+        await source.add_ticker("MSFT")
+        await asyncio.sleep(0.2)
+        assert source._fetch_snapshots.call_count == 1  # min_gap alone would allow a retry
+        await source.stop()

@@ -155,3 +155,18 @@ class TestReferencePrice:
             t.join()
         assert cache.version == 8000
         assert len(cache) == 8
+
+
+class TestSubDollarRounding:
+    """3.7: low-priced tickers keep 4 decimals instead of collapsing to 0."""
+
+    def test_penny_price_keeps_precision(self):
+        cache = PriceCache()
+        update = cache.update("PENNY", 0.004217)
+        assert update.price == 0.0042
+        assert update.reference_price == 0.0042
+        assert update.day_change_percent == 0.0
+
+    def test_dollar_and_above_round_to_cents(self):
+        cache = PriceCache()
+        assert cache.update("X", 1.23456).price == 1.23

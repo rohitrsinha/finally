@@ -123,6 +123,7 @@ class MassiveDataSource(MarketDataSource):
         self._max_backoff = max_backoff
         self._tickers: list[str] = []
         self._task: asyncio.Task | None = None
+        self._started = False
         self._client: RESTClient | None = None
         self._wake = asyncio.Event()
         self._last_poll = 0.0  # event-loop clock time of the last request
@@ -130,10 +131,18 @@ class MassiveDataSource(MarketDataSource):
         self._missing: set[str] = set()  # tracked tickers the API returned nothing for
 
     async def start(self, tickers: list[str]) -> None:
+        if self._started:
+            raise RuntimeError("MassiveDataSource.start() called twice")
+        self._started = True
         self._client = RESTClient(api_key=self._api_key, connect_timeout=5.0, read_timeout=10.0)
-        self._tickers = list(dict.fromkeys(normalize_ticker(t) for t in tickers))
+        # Normalize and de-duplicate while keeping order; include pre-start adds
+        self._tickers = list(
+            dict.fromkeys([*(normalize_ticker(t) for t in tickers), *self._tickers])
+        )
 
-        # Do an immediate first poll so the cache has data right away
+        # Do an immediate first poll so the cache has data right away. It covers
+        # any pre-start add_ticker() calls, so drop their wake-up request.
+        self._wake.clear()
         await self._poll_once()
 
         self._task = asyncio.create_task(self._poll_loop(), name="massive-poller")
@@ -187,6 +196,11 @@ class MassiveDataSource(MarketDataSource):
     async def _poll_loop(self) -> None:
         """Poll on interval (or earlier when woken). First poll happened in start()."""
         while True:
+            if not self._tickers:
+                # Nothing to poll: sleep until add_ticker() wakes us. Without this,
+                # a stale _last_poll makes the timed wait below return instantly
+                # and the loop spins at 100% CPU.
+                await self._wake.wait()
             await self._wait_for_next_poll()
             self._wake.clear()
             await self._poll_once()
@@ -198,8 +212,10 @@ class MassiveDataSource(MarketDataSource):
             await asyncio.wait_for(self._wake.wait(), timeout=max(0.0, due - loop.time()))
         except TimeoutError:
             return  # regular cadence
-        # Woken early by add_ticker(): still respect the minimum request gap.
-        earliest = self._last_poll + self._min_gap
+        # Woken early by add_ticker(): still respect the minimum request gap and,
+        # while the API is failing, the backoff (don't hammer a 401/429).
+        gap = self._min_gap if self._failures == 0 else max(self._min_gap, self._current_delay())
+        earliest = self._last_poll + gap
         await asyncio.sleep(max(0.0, earliest - loop.time()))
 
     async def _poll_once(self) -> None:
@@ -246,7 +262,7 @@ class MassiveDataSource(MarketDataSource):
             )
             seen.add(quote.ticker)
 
-        self._missing = set(tickers) - seen
+        self._missing = (set(tickers) & tracked) - seen
         if self._missing:
             logger.warning("Massive returned no data for: %s", ", ".join(sorted(self._missing)))
         logger.debug("Massive poll: updated %d/%d tickers", len(seen), len(tickers))

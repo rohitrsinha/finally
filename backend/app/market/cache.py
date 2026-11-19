@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from threading import Lock
 
-from .models import PriceUpdate
+from .models import PriceUpdate, round_price
 
 
 class PriceCache:
@@ -42,10 +42,10 @@ class PriceCache:
 
             update = PriceUpdate(
                 ticker=ticker,
-                price=round(price, 2),
-                previous_price=round(previous_price, 2),
+                price=round_price(price),
+                previous_price=round_price(previous_price),
                 timestamp=timestamp if timestamp is not None else time.time(),
-                reference_price=round(reference_price, 2) if reference_price else None,
+                reference_price=round_price(reference_price) if reference_price else None,
             )
             self._prices[ticker] = update
             self._version += 1

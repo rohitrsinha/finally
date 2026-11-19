@@ -125,3 +125,17 @@ class TestMarketDataConfig:
         assert isinstance(sim, SimulatorDataSource)
         assert sim._interval == 0.2
         assert sim._seed == 9
+
+
+class TestConfigClamping:
+    """3.4: out-of-range simulator settings are clamped."""
+
+    def test_simulator_interval_floor(self):
+        for raw in ("0", "-1", "0.001"):
+            with patch.dict(os.environ, {"SIMULATOR_INTERVAL": raw}, clear=True):
+                assert MarketDataConfig.from_env().simulator_interval == 0.05
+
+    def test_event_probability_clamped(self):
+        for raw, expected in (("-0.5", 0.0), ("7", 1.0), ("0.2", 0.2)):
+            with patch.dict(os.environ, {"SIMULATOR_EVENT_PROBABILITY": raw}, clear=True):
+                assert MarketDataConfig.from_env().simulator_event_probability == expected
